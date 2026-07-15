@@ -1,27 +1,51 @@
 # AI Personal Productivity OS
 
-Ứng dụng lập lịch cá nhân bằng AI. Người dùng nhập công việc, deadline, ghi chú riêng hoặc quét Gmail; hệ thống dùng GPT/Gemini để phân tích, xếp lịch 14 ngày, lưu lại lịch và đồng bộ memory lên Qdrant.
+AI Personal Productivity OS là hệ thống lập lịch cá nhân bằng AI. Người dùng nhập công việc, deadline, ghi chú riêng hoặc quét Gmail; hệ thống dùng GPT/Gemini để phân tích nhu cầu, xếp lịch 14 ngày, lưu kế hoạch và đồng bộ dữ liệu lên Qdrant để làm bộ nhớ cá nhân.
 
-## Tính năng chính
+## Hệ thống làm gì?
 
-- Giao diện tiếng Việt để tạo/chỉnh sửa lịch theo `user_id`.
-- Thêm công việc bằng từng ô riêng, có deadline hằng ngày hoặc thời gian cụ thể.
-- Nhập “Thông tin thêm” để cập nhật lịch mà không cần thêm task thủ công.
-- Quét Gmail 3 ngày gần nhất, lọc email liên quan lịch trình rồi đưa vào lịch.
-- Chọn LLM: OpenAI, Gemini hoặc chế độ đối chiếu cả hai.
-- Lưu dữ liệu vào SQLite, file JSON và Qdrant Cloud/local.
-- Có Docker, CI GitHub Actions, test và eval golden set.
+Ứng dụng giúp biến thông tin rời rạc như “học tiếng Anh mỗi tối”, “nấu cơm 3 bữa”, “có email lịch họp” thành lịch trình theo ngày. Mỗi người dùng có một lịch riêng theo `user_id`; khi cập nhật, hệ thống giữ lại các tiêu chí cũ và kết hợp với yêu cầu mới.
 
-## Stack
+## Chức năng chính
 
-- Backend: FastAPI, Pydantic
-- LLM: OpenAI API, Gemini API
-- Memory/vector DB: Qdrant + Voyage embeddings
-- Gmail: Google OAuth read-only
-- Frontend: HTML/CSS/JS thuần
-- Test/CI: pytest, ruff, GitHub Actions
+- Tạo và chỉnh sửa lịch 14 ngày theo từng người dùng.
+- Thêm công việc bằng từng ô riêng, có thời lượng và deadline.
+- Hỗ trợ deadline hằng ngày hoặc thời gian cụ thể.
+- Cho phép chỉ nhập “Thông tin thêm” để cập nhật lịch.
+- Quét Gmail read-only trong vài ngày gần nhất để tìm email liên quan lịch trình.
+- Dùng OpenAI, Gemini hoặc chế độ đối chiếu cả hai.
+- Tự xếp công việc theo ưu tiên, thời lượng, deadline và ràng buộc cá nhân.
+- Lưu lịch vào SQLite, file JSON và Qdrant.
+- Có guardrails, test và eval để giảm hallucination của LLM.
 
-## Cài đặt nhanh
+## Kiến trúc
+
+```text
+app/
+  api/            # FastAPI routes
+  core/           # cấu hình ứng dụng
+  integrations/   # Gmail integration
+  llm/            # OpenAI, Gemini, compare provider
+  memory/         # Voyage embedding + Qdrant
+  reliability/    # guardrails, confidence
+  storage/        # SQLite + JSON repository
+  web/            # giao diện tiếng Việt
+  workflow/       # logic phân tích và xếp lịch
+tests/            # unit/integration tests
+evals/            # golden-set evaluation
+```
+
+## Công nghệ
+
+- FastAPI, Pydantic
+- OpenAI API, Gemini API
+- Voyage embeddings
+- Qdrant vector database
+- SQLite + JSON persistence
+- Gmail API OAuth read-only
+- Docker, pytest, ruff
+
+## Cài đặt
 
 ```powershell
 python -m venv .personal_schedule
@@ -30,7 +54,7 @@ python -m pip install -e ".[dev]"
 copy .env.example .env
 ```
 
-Điền các key cần dùng trong `.env`:
+Điền API key cần dùng trong `.env`:
 
 ```env
 LLM_PROVIDER=gemini
@@ -47,16 +71,22 @@ VOYAGE_API_KEY=
 VOYAGE_MODEL=voyage-3.5
 ```
 
-Chạy app:
+## Chạy ứng dụng
 
 ```powershell
 .\.personal_schedule\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Mở:
+Mở giao diện:
 
 ```text
 http://localhost:8000/
+```
+
+API docs:
+
+```text
+http://localhost:8000/docs
 ```
 
 ## Chọn LLM
@@ -67,7 +97,9 @@ LLM_PROVIDER=gemini
 LLM_PROVIDER=compare
 ```
 
-`compare` sẽ gọi cả GPT và Gemini để đối chiếu, sau đó dùng kết quả chính để lập lịch.
+- `openai`: chỉ dùng GPT.
+- `gemini`: chỉ dùng Gemini.
+- `compare`: gọi cả GPT và Gemini để đối chiếu.
 
 ## Gmail
 
@@ -75,32 +107,43 @@ LLM_PROVIDER=compare
 
 1. Bật Gmail API trong Google Cloud Console.
 2. Tạo OAuth Client loại Desktop app.
-3. Lưu credentials tại:
+3. Lưu file credentials tại:
 
 ```text
 secrets/gmail_credentials.json
 ```
 
-`.env`:
+Thêm vào `.env`:
 
 ```env
 GMAIL_CREDENTIALS_PATH=secrets/gmail_credentials.json
 GMAIL_TOKEN_PATH=data/gmail_token.json
+GMAIL_SCAN_DAYS=3
+GMAIL_MAX_RESULTS=50
 ```
 
 Lần đầu bấm “Quét Gmail và cập nhật lịch”, trình duyệt sẽ mở OAuth để chọn tài khoản Gmail.
 
+## Qdrant
+
+Lịch được lưu cục bộ vào SQLite/JSON. Sau đó payload được embed bằng Voyage và upsert lên Qdrant.
+
+Collection Qdrant nên dùng:
+
+```text
+collection: personal_productivity_memory
+vector name: dense
+vector size: 1024
+distance: Cosine
+```
+
 ## Docker
-
-Không bắt buộc phải build Docker trước khi push GitHub. Chỉ cần commit `Dockerfile`, `docker-compose.yml` và CI sẽ build sau khi push.
-
-Chạy Docker local:
 
 ```powershell
 docker compose up --build
 ```
 
-Build image thủ công:
+Hoặc build image thủ công:
 
 ```powershell
 docker build -t personal-schedule-ai .
@@ -114,55 +157,3 @@ ruff check .
 python -m pytest
 python -m evals.run --dataset evals/data/golden.jsonl
 ```
-
-## CI/CD
-
-GitHub Actions nằm ở:
-
-```text
-.github/workflows/ci.yml
-```
-
-CI sẽ chạy:
-
-- `ruff check`
-- `pytest`
-- golden-set eval
-- build/push Docker image lên GHCR khi push vào `main`
-
-## File nên commit
-
-```text
-app/
-tests/
-evals/
-.github/workflows/ci.yml
-Dockerfile
-docker-compose.yml
-requirements.txt
-pyproject.toml
-README.md
-README_FULL.md
-.env.example
-.dockerignore
-.gitignore
-ai_personal_productivity_os_workflow.md
-```
-
-Không commit:
-
-```text
-.env
-data/
-secrets/
-.personal_schedule/
-.venv/
-*.egg-info/
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-```
-
-## Tài liệu chi tiết
-
-Xem [README_FULL.md](README_FULL.md) nếu cần hướng dẫn đầy đủ về Qdrant, Gmail, hallucination handling, evaluation và roadmap.
