@@ -8,6 +8,8 @@ from app.memory.embeddings import VoyageEmbedder
 from app.memory.qdrant import QdrantMemory
 from app.schemas import PlanSummary, WorkflowResult
 
+MAX_STORED_NOTE_CHARS = 1000
+
 
 class PlanRepository:
     """Small SQLite repository so a saved plan survives browser refresh and restarts."""
@@ -144,4 +146,20 @@ class PlanRepository:
                 "SELECT payload_json FROM plans WHERE user_id = ? AND plan_id = ?",
                 (user_id, plan_id),
             ).fetchone()
-        return WorkflowResult.model_validate_json(row["payload_json"]) if row else None
+        if not row:
+            return None
+        try:
+            return WorkflowResult.model_validate_json(row["payload_json"])
+        except Exception:
+            repaired = self._repair_payload(row["payload_json"])
+            return WorkflowResult.model_validate(repaired)
+
+    @staticmethod
+    def _repair_payload(payload_json: str) -> dict:
+        payload = json.loads(payload_json)
+        plan_input = payload.get("plan_input")
+        if isinstance(plan_input, dict):
+            notes = str(plan_input.get("planning_notes") or "")
+            if len(notes) > MAX_STORED_NOTE_CHARS:
+                plan_input["planning_notes"] = notes[-MAX_STORED_NOTE_CHARS:]
+        return payload

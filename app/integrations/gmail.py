@@ -9,16 +9,26 @@ from app.schemas import WorkflowRequest
 
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+MAX_WORKFLOW_TEXT_CHARS = 950
+MAX_GMAIL_NOTES = 8
+MAX_GMAIL_NOTE_CHARS = 240
 SCHEDULE_KEYWORDS = (
     "calendar",
+    "breakfast",
     "class",
+    "coffee",
     "deadline",
+    "dinner",
     "due",
     "event",
     "flight",
+    "lunch",
     "hạn",
     "hẹn",
     "họp",
+    "ăn",
+    "chơi",
+    "cà phê",
     "interview",
     "lịch",
     "meeting",
@@ -27,15 +37,45 @@ SCHEDULE_KEYWORDS = (
     "thi",
     "workshop",
 )
+NON_SCHEDULE_KEYWORDS = (
+    "khuyến mãi",
+    "giảm giá",
+    "sale",
+    "voucher",
+    "newsletter",
+    "unsubscribe",
+    "quảng cáo",
+    "promotion",
+)
 
 GMAIL_ANALYSIS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
+        "classified_messages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string"},
+                    "is_schedule_related": {"type": "boolean"},
+                    "schedule_note": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": [
+                    "message_id",
+                    "is_schedule_related",
+                    "schedule_note",
+                    "reason",
+                    "confidence",
+                ],
+            },
+        },
         "relevant_notes": {"type": "array", "items": {"type": "string"}},
         "ignored_message_ids": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["summary", "relevant_notes", "ignored_message_ids"],
+    "required": ["summary", "classified_messages", "relevant_notes", "ignored_message_ids"],
 }
 
 
@@ -129,6 +169,8 @@ class GmailScheduleImporter:
         notes, warnings = self._extract_schedule_notes(messages, days)
         if not notes:
             notes = [f"Không tìm thấy email liên quan lịch trình trong {days} ngày gần nhất."]
+        notes = self._compact_notes(notes)
+        warnings = self._compact_notes(warnings, limit=3)
         planning_notes = "\n".join(
             [
                 f"Nguồn: Gmail {days} ngày gần nhất.",
@@ -136,10 +178,12 @@ class GmailScheduleImporter:
                 *warnings,
             ]
         )
+        raw_input = self._cap_text("\n".join(notes))
+        planning_notes = self._cap_text(planning_notes)
         return WorkflowRequest(
             user_id=user_id,
             display_name=display_name,
-            raw_input="\n".join(notes),
+            raw_input=raw_input,
             planning_notes=planning_notes,
             horizon_days=14,
         )
@@ -152,8 +196,12 @@ class GmailScheduleImporter:
         prompt = json.dumps(
             {
                 "instruction": (
-                    "Lọc các email liên quan lịch trình, deadline, cuộc hẹn, lớp học, "
-                    "sự kiện, chuyến đi hoặc việc cần đưa vào lịch. Trả JSON theo schema."
+                    "Bạn là bộ phân loại Gmail cho lịch cá nhân. Đọc từng email và quyết định "
+                    "email đó có tạo/cập nhật lịch trình không. Chỉ đánh dấu is_schedule_related=true "
+                    "nếu email chứa cuộc hẹn, deadline, lớp học, công việc cần làm theo thời gian, "
+                    "chuyến đi, lời mời gặp mặt/ăn/chơi, hoặc thông tin có thể chuyển thành block lịch. "
+                    "Bỏ qua quảng cáo, newsletter, thông báo hệ thống, hóa đơn hoặc mail mơ hồ. "
+                    "schedule_note phải ngắn, tiếng Việt, chỉ chứa sự kiện/việc cần đưa vào lịch."
                 ),
                 "messages": [message.__dict__ for message in messages],
             },
@@ -161,11 +209,7 @@ class GmailScheduleImporter:
         )
         try:
             response = self.provider.generate_json(prompt, GMAIL_ANALYSIS_SCHEMA)
-            notes = [
-                str(item).strip()
-                for item in response.data.get("relevant_notes", [])
-                if str(item).strip()
-            ]
+            notes = self._notes_from_ai_response(response.data)
             if notes:
                 return notes, []
         except Exception as exc:
@@ -175,14 +219,58 @@ class GmailScheduleImporter:
         return self._local_filter(messages), ["LLM không tìm thấy email lịch trình rõ ràng."]
 
     @staticmethod
+    def _notes_from_ai_response(data: dict[str, Any]) -> list[str]:
+        notes: list[str] = []
+        for item in data.get("classified_messages", []):
+            if not isinstance(item, dict):
+                continue
+            if not item.get("is_schedule_related"):
+                continue
+            if float(item.get("confidence") or 0) < 0.55:
+                continue
+            note = str(item.get("schedule_note") or "").strip()
+            if note:
+                notes.append(note)
+        if notes:
+            return notes
+        return [
+            str(item).strip()
+            for item in data.get("relevant_notes", [])
+            if str(item).strip()
+        ]
+
+    @staticmethod
     def _local_filter(messages: list[GmailMessage]) -> list[str]:
         pattern = re.compile("|".join(re.escape(keyword) for keyword in SCHEDULE_KEYWORDS), re.I)
+        noise = re.compile("|".join(re.escape(keyword) for keyword in NON_SCHEDULE_KEYWORDS), re.I)
         notes = []
         for message in messages:
             haystack = f"{message.subject}\n{message.snippet}"
-            if pattern.search(haystack):
+            if pattern.search(haystack) and not noise.search(haystack):
                 notes.append(
                     "Email Gmail liên quan lịch trình: "
-                    f"{message.subject} | từ {message.sender} | ngày {message.date} | {message.snippet}"
+                    f"{message.subject} | từ {message.sender} | ngày {message.date} | "
+                    f"{GmailScheduleImporter._cap_text(message.snippet, MAX_GMAIL_NOTE_CHARS)}"
                 )
         return notes
+
+    @staticmethod
+    def _compact_notes(notes: list[str], limit: int = MAX_GMAIL_NOTES) -> list[str]:
+        compacted: list[str] = []
+        seen: set[str] = set()
+        for note in notes:
+            cleaned = " ".join(str(note).split())
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            compacted.append(GmailScheduleImporter._cap_text(cleaned, MAX_GMAIL_NOTE_CHARS))
+            if len(compacted) >= limit:
+                break
+        return compacted
+
+    @staticmethod
+    def _cap_text(value: str, limit: int = MAX_WORKFLOW_TEXT_CHARS) -> str:
+        text = str(value).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"

@@ -13,4 +13,6 @@ build/
 dist/
 data/
 secrets/
+docs/
+scripts/
 README_FULL.md

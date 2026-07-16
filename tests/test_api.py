@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.core.settings import Settings, get_settings
+from app.api.routes import _merge_notes
 from app.main import app
 
 
@@ -115,3 +116,14 @@ def test_deadline_only_input_can_create_task():
     body = response.json()
     assert body["tasks"][0]["title"]
     assert any(block["block_type"] == "task" for block in body["schedule"])
+
+
+def test_merge_notes_deduplicates_and_caps_length():
+    previous = "Yêu cầu riêng trước đó:\n" + ("thích học sáng\n" * 120)
+    updated = "Cập nhật mới:\nthích học sáng"
+
+    merged = _merge_notes(previous, updated)
+
+    assert len(merged) <= 950
+    assert "Yêu cầu riêng trước đó:" not in merged
+    assert "Cập nhật mới:" not in merged

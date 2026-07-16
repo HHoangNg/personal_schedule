@@ -31,6 +31,17 @@ class MockProvider:
     def generate_json(self, prompt: str, schema: dict[str, Any]) -> StructuredLLMResponse:
         try:
             context = json.loads(prompt)
+            if "messages" in context and "relevant_notes" in schema.get("properties", {}):
+                classified, relevant_notes, ignored = self._mock_gmail_analysis(
+                    context.get("messages", [])
+                )
+                data = {
+                    "summary": f"Tìm thấy {len(relevant_notes)} email có khả năng liên quan lịch trình.",
+                    "classified_messages": classified,
+                    "relevant_notes": relevant_notes,
+                    "ignored_message_ids": ignored,
+                }
+                return StructuredLLMResponse(data, json.dumps(data, ensure_ascii=False), "mock")
             structured = context.get("structured_tasks", [])
             prompt = ", ".join(item.get("title", "") for item in structured) or context.get("task_text", prompt)
         except (json.JSONDecodeError, AttributeError):
@@ -48,6 +59,47 @@ class MockProvider:
             for title in titles
         ]
         return StructuredLLMResponse({"tasks": tasks}, json.dumps({"tasks": tasks}), "mock")
+
+    @staticmethod
+    def _mock_gmail_analysis(messages: list[dict]) -> tuple[list[dict], list[str], list[str]]:
+        relevant_terms = re.compile(
+            r"lịch|họp|hẹn|deadline|class|meeting|event|flight|ăn|chơi|cà phê|coffee|dinner|lunch",
+            re.I,
+        )
+        noise_terms = re.compile(r"khuyến mãi|giảm giá|sale|voucher|newsletter|unsubscribe|quảng cáo", re.I)
+        notes: list[str] = []
+        ignored: list[str] = []
+        classified: list[dict] = []
+        for message in messages:
+            text = f"{message.get('subject', '')}\n{message.get('snippet', '')}"
+            if relevant_terms.search(text) and not noise_terms.search(text):
+                note = (
+                    "Email Gmail liên quan lịch trình: "
+                    f"{message.get('subject', '')} | từ {message.get('sender', '')} | "
+                    f"ngày {message.get('date', '')} | {message.get('snippet', '')}"
+                )
+                notes.append(note)
+                classified.append(
+                    {
+                        "message_id": str(message.get("message_id", "")),
+                        "is_schedule_related": True,
+                        "schedule_note": note,
+                        "reason": "Có dấu hiệu cuộc hẹn/lịch trình.",
+                        "confidence": 0.9,
+                    }
+                )
+            else:
+                ignored.append(str(message.get("message_id", "")))
+                classified.append(
+                    {
+                        "message_id": str(message.get("message_id", "")),
+                        "is_schedule_related": False,
+                        "schedule_note": "",
+                        "reason": "Không đủ bằng chứng là lịch trình.",
+                        "confidence": 0.8,
+                    }
+                )
+        return classified, notes, ignored
 
 
 class OpenAIProvider:

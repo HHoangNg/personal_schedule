@@ -7,6 +7,7 @@ from app.storage.repository import PlanRepository
 from app.workflow.calendar_workflow import CalendarWorkflow
 
 router = APIRouter(prefix="/v1")
+MAX_NOTE_CHARS = 950
 
 
 def repository(settings: Settings) -> PlanRepository:
@@ -46,11 +47,7 @@ def merge_with_existing_request(
         else:
             merged_tasks.append(task)
 
-    notes = []
-    if previous.planning_notes.strip():
-        notes.append(f"Yêu cầu riêng trước đó:\n{previous.planning_notes.strip()}")
-    if request.planning_notes.strip():
-        notes.append(f"Cập nhật mới:\n{request.planning_notes.strip()}")
+    notes = _merge_notes(previous.planning_notes, request.planning_notes)
 
     raw_parts = [part for part in [previous.raw_input.strip(), request.raw_input.strip()] if part]
     return previous.model_copy(
@@ -58,10 +55,26 @@ def merge_with_existing_request(
             "display_name": request.display_name.strip() or previous.display_name,
             "raw_input": "\n".join(dict.fromkeys(raw_parts)),
             "task_inputs": merged_tasks,
-            "planning_notes": "\n\n".join(notes),
+            "planning_notes": notes,
             "horizon_days": request.horizon_days,
         }
     )
+
+
+def _merge_notes(previous: str, new: str) -> str:
+    parts: list[str] = []
+    for value in [previous.strip(), new.strip()]:
+        if not value:
+            continue
+        cleaned = "\n".join(
+            line
+            for line in value.splitlines()
+            if line.strip() not in {"Yêu cầu riêng trước đó:", "Cập nhật mới:"}
+        ).strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    merged = "\n\n".join(parts)
+    return merged[-MAX_NOTE_CHARS:]
 
 
 @router.post("/workflow/plan", response_model=WorkflowResult)
