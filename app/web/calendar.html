@@ -28,10 +28,34 @@
         </form>
       </section>
 
+      <section class="assistant-card">
+        <div class="section-title"><div><p class="eyebrow">TRỢ LÝ AI</p><h2>Nói với AI điều bạn muốn thay đổi</h2></div><span class="hint">Ví dụ: “Từ mai tôi không muốn học toán nữa”</span></div>
+        <form id="assistant-form">
+          <label>Yêu cầu tự nhiên<textarea id="assistant-message" rows="3" placeholder="Ví dụ: Tuần này tôi thường mệt buổi tối, hãy dời việc học sang buổi sáng và giữ lịch đi làm."></textarea></label>
+          <button class="primary-button" type="submit" id="assistant-button">AI hiểu và cập nhật lịch</button>
+        </form>
+        <p id="assistant-result" class="assistant-result" aria-live="polite"></p>
+      </section>
+
       <section class="calendar-card" aria-live="polite">
-        <div class="calendar-heading"><div><p class="eyebrow">LỊCH TRÌNH</p><h2>Lịch 14 ngày</h2><p id="calendar-user-name" class="selected-user"></p></div><span id="calendar-status" class="status">Chưa có lịch mới</span></div>
+        <div class="calendar-heading"><div><p class="eyebrow">LỊCH TRÌNH</p><h2>Lịch 14 ngày</h2><p id="calendar-user-name" class="selected-user"></p></div><div class="calendar-tools"><button id="recalculate-button" class="outline-button" type="button">AI đánh giá lại</button><span id="calendar-status" class="status">Chưa có lịch mới</span></div></div>
         <div id="day-tabs" class="day-tabs"></div>
         <div id="day-view" class="day-view"><div class="empty-calendar">Tạo lịch để xem các khối công việc, thời gian cá nhân và nghỉ ngơi.</div></div>
+      </section>
+
+      <section class="feedback-card">
+        <div class="section-title"><div><p class="eyebrow">HỌC TỪ THỰC TẾ</p><h2>Feedback cuối ngày</h2></div><span id="analytics-summary" class="hint">Chưa có dữ liệu hành vi</span></div>
+        <form id="feedback-form">
+          <div class="feedback-grid">
+            <label>Năng lượng (1–5)<input id="feedback-energy" type="number" min="1" max="5" value="3" required /></label>
+            <label>Mức tập trung (1–5)<input id="feedback-focus" type="number" min="1" max="5" value="3" required /></label>
+            <label>Khung giờ hiệu quả<select id="feedback-period"><option value="flexible">Linh hoạt</option><option value="morning">Sáng</option><option value="afternoon">Chiều</option><option value="evening">Tối</option><option value="night">Đêm</option></select></label>
+            <label>Cảm nhận lịch<select id="feedback-feeling"><option value="balanced">Cân bằng</option><option value="too_light">Quá nhẹ</option><option value="too_heavy">Quá nặng</option><option value="unrealistic">Chưa thực tế</option></select></label>
+          </div>
+          <label>Công việc bị trì hoãn (cách nhau bằng dấu phẩy)<input id="feedback-procrastinated" placeholder="Ví dụ: Học toán, Dọn nhà" /></label>
+          <label>Ghi chú hôm nay<textarea id="feedback-note" rows="3" placeholder="Điều gì khiến bạn làm tốt hoặc bị gián đoạn?"></textarea></label>
+          <button class="primary-button" type="submit">Lưu feedback và cập nhật hồ sơ AI</button>
+        </form>
       </section>
     </main>
     <script src="/static/calendar.js"></script>

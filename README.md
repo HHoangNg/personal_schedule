@@ -1,51 +1,65 @@
 # AI Personal Productivity OS
 
-AI Personal Productivity OS là hệ thống lập lịch cá nhân bằng AI. Người dùng nhập công việc, deadline, ghi chú riêng hoặc quét Gmail; hệ thống dùng GPT/Gemini để phân tích nhu cầu, xếp lịch 14 ngày, lưu kế hoạch và đồng bộ dữ liệu lên Qdrant để làm bộ nhớ cá nhân.
+AI Personal Productivity OS is an AI-powered personal scheduling system. Users enter tasks, deadlines, personal notes or scan Gmail; the system uses GPT/Gemini to analyze needs, build a 14-day schedule, save plans and synchronize data to Qdrant as personal memory.
 
-## Hệ thống làm gì?
+## What does the system do?
 
-Ứng dụng giúp biến thông tin rời rạc như “học tiếng Anh mỗi tối”, “nấu cơm 3 bữa”, “có email lịch họp” thành lịch trình theo ngày. Mỗi người dùng có một lịch riêng theo `user_id`; khi cập nhật, hệ thống giữ lại các tiêu chí cũ và kết hợp với yêu cầu mới.
+The application turns scattered information such as “study English every evening”, “cook three meals”, or “there is a meeting scheduled by email” into a daily schedule. Each user has one schedule identified by `user_id`; updates preserve previous criteria and combine them with new requests.
 
-## Chức năng chính
+## Main features
 
-- Tạo và chỉnh sửa lịch 14 ngày theo từng người dùng.
-- Thêm công việc bằng từng ô riêng, có thời lượng và deadline.
-- Hỗ trợ deadline hằng ngày hoặc thời gian cụ thể.
-- Cho phép chỉ nhập “Thông tin thêm” để cập nhật lịch.
-- Quét Gmail read-only trong vài ngày gần nhất để tìm email liên quan lịch trình.
-- Dùng OpenAI, Gemini hoặc chế độ đối chiếu cả hai.
-- Tự xếp công việc theo ưu tiên, thời lượng, deadline và ràng buộc cá nhân.
-- Lưu lịch vào SQLite, file JSON và Qdrant.
-- Có guardrails, test và eval để giảm hallucination của LLM.
+- Create and edit a 14-day schedule for each user.
+- Add tasks in separate fields with duration and deadline.
+- Support daily deadlines or specific date-and-time deadlines.
+- Update the schedule using only the “Additional information” field.
+- Scan Gmail in read-only mode for recent schedule-related emails.
+- Use OpenAI, Gemini or a comparison mode using both providers.
+- Automatically schedule tasks according to priority, duration, deadlines and personal constraints.
+- Store schedules in SQLite, JSON files and Qdrant.
+- Record real execution for each block: completed, skipped, rescheduled or partial.
+- Collect daily feedback, performance statistics and a user-specific behavior profile.
+- Use real history to provide priority evidence, effective periods, duration estimates and task-splitting suggestions.
+- Include guardrails, tests and evaluations to reduce LLM hallucinations.
 
-## Kiến trúc
+## Personalization loop
+
+```text
+AI proposes a schedule → the user records actual status → daily feedback
+→ BehaviorProfile → AI reevaluates priorities and periods at the next update
+```
+
+After at least 7 feedback days or 5 execution records, the system can use behavior data
+to automatically adjust the schedule. Before that threshold, the data is used only for
+statistics and supporting evidence.
+
+## Architecture
 
 ```text
 app/
   api/            # FastAPI routes
-  core/           # cấu hình ứng dụng
+  core/           # application configuration
   integrations/   # Gmail integration
-  llm/            # OpenAI, Gemini, compare provider
-  memory/         # Voyage embedding + Qdrant
-  reliability/    # guardrails, confidence
+  llm/            # OpenAI, Gemini and comparison provider
+  memory/         # Voyage embeddings + Qdrant
+  reliability/    # guardrails and confidence
   storage/        # SQLite + JSON repository
-  web/            # giao diện tiếng Việt
-  workflow/       # logic phân tích và xếp lịch
-tests/            # unit/integration tests
+  web/            # Vietnamese web interface
+  workflow/       # analysis and scheduling logic
+tests/            # unit and integration tests
 evals/            # golden-set evaluation
 ```
 
-## Công nghệ
+## Technologies
 
 - FastAPI, Pydantic
 - OpenAI API, Gemini API
 - Voyage embeddings
 - Qdrant vector database
 - SQLite + JSON persistence
-- Gmail API OAuth read-only
+- Gmail API OAuth read-only access
 - Docker, pytest, ruff
 
-## Cài đặt
+## Installation
 
 ```powershell
 python -m venv .personal_schedule
@@ -54,7 +68,7 @@ python -m pip install -e ".[dev]"
 copy .env.example .env
 ```
 
-Điền API key cần dùng trong `.env`:
+Set the required API keys in `.env`:
 
 ```env
 LLM_PROVIDER=gemini
@@ -71,25 +85,25 @@ VOYAGE_API_KEY=
 VOYAGE_MODEL=voyage-3.5
 ```
 
-## Chạy ứng dụng
+## Run the application
 
 ```powershell
 .\.personal_schedule\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Mở giao diện:
+Open the interface:
 
 ```text
 http://localhost:8000/
 ```
 
-API docs:
+API documentation:
 
 ```text
 http://localhost:8000/docs
 ```
 
-## Chọn LLM
+## Choose an LLM
 
 ```env
 LLM_PROVIDER=openai
@@ -97,23 +111,23 @@ LLM_PROVIDER=gemini
 LLM_PROVIDER=compare
 ```
 
-- `openai`: chỉ dùng GPT.
-- `gemini`: chỉ dùng Gemini.
-- `compare`: gọi cả GPT và Gemini để đối chiếu.
+- `openai`: use GPT only.
+- `gemini`: use Gemini only.
+- `compare`: call both GPT and Gemini for comparison.
 
 ## Gmail
 
-Để quét Gmail:
+To scan Gmail:
 
-1. Bật Gmail API trong Google Cloud Console.
-2. Tạo OAuth Client loại Desktop app.
-3. Lưu file credentials tại:
+1. Enable the Gmail API in Google Cloud Console.
+2. Create an OAuth Client of type Desktop app.
+3. Store the credentials file at:
 
 ```text
 secrets/gmail_credentials.json
 ```
 
-Thêm vào `.env`:
+Add the following to `.env`:
 
 ```env
 GMAIL_CREDENTIALS_PATH=secrets/gmail_credentials.json
@@ -122,13 +136,13 @@ GMAIL_SCAN_DAYS=3
 GMAIL_MAX_RESULTS=50
 ```
 
-Lần đầu bấm “Quét Gmail và cập nhật lịch”, trình duyệt sẽ mở OAuth để chọn tài khoản Gmail.
+The first time you click “Scan Gmail and update schedule”, the browser opens OAuth so you can choose a Gmail account.
 
 ## Qdrant
 
-Lịch được lưu cục bộ vào SQLite/JSON. Sau đó payload được embed bằng Voyage và upsert lên Qdrant.
+Schedules are stored locally in SQLite/JSON. The payload is then embedded with Voyage and upserted to Qdrant.
 
-Collection Qdrant nên dùng:
+Recommended Qdrant collection:
 
 ```text
 collection: personal_productivity_memory
@@ -137,20 +151,56 @@ vector size: 1024
 distance: Cosine
 ```
 
+Feedback and execution logs are also embedded and stored in the same collection, with payload fields such as
+`user_id`, `plan_id`, `block_id` or the feedback date. SQLite/JSON remains the source of truth;
+Qdrant provides personal-memory retrieval and does not make the application lose data when the cloud service is temporarily unavailable.
+
+## APIs for real-world tracking
+
+- `POST /v1/schedule/{plan_id}/blocks/{block_id}/status`: update status and actual duration.
+- `POST /v1/feedback/daily`: save energy, focus, effective period and procrastination reasons.
+- `GET /v1/analytics/productivity?user_id=...`: view completion, delay and behavior statistics.
+- `GET /v1/profile?user_id=...`: get the current personalization profile.
+- `POST /v1/workflow/recalculate`: rebuild the current schedule using behavior history while preserving `plan_id`.
+- `DELETE /v1/profile/{user_id}`: delete the user's schedule, feedback and execution logs.
+
+## AI conversational assistant
+
+Users can enter natural-language requests in Vietnamese to create, edit, delete or reschedule items. The AI retrieves personal memory, classifies the intent, updates the current schedule and stores a decision audit.
+
+```text
+POST /v1/assistant/message
+GET  /v1/schedule/insights?user_id=...
+GET  /v1/decisions?user_id=...
+POST /v1/schedule/apply-suggestion
+```
+
+Example:
+
+```json
+{
+  "user_id": "demo-user",
+  "message": "From tomorrow I no longer want to study mathematics; keep the other tasks."
+}
+```
+
+GPT/Gemini are compared only when `LLM_PROVIDER=compare` is configured. If the LLM or Qdrant fails,
+the local schedule is still saved and the response contains a warning.
+
 ## Docker
 
 ```powershell
 docker compose up --build
 ```
 
-Hoặc build image thủ công:
+Or build the image manually:
 
 ```powershell
 docker build -t personal-schedule-ai .
 docker run --env-file .env -p 8000:8000 personal-schedule-ai
 ```
 
-## Kiểm tra
+## Checks
 
 ```powershell
 ruff check .

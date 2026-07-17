@@ -31,6 +31,28 @@ class MockProvider:
     def generate_json(self, prompt: str, schema: dict[str, Any]) -> StructuredLLMResponse:
         try:
             context = json.loads(prompt)
+            if "action" in schema.get("properties", {}) and "planner_message" in schema.get("properties", {}):
+                message = str(context.get("message", ""))
+                normalized = message.casefold()
+                if re.search(r"không\s+muốn|khong\s+muon|xóa|xoa|bỏ|bo|hủy|huy", normalized):
+                    action = "delete_task"
+                elif re.search(r"dời|doi|chuyển|chuyen|sắp lại|sap lai", normalized):
+                    action = "reschedule"
+                elif re.search(r"đi làm|di lam|bận|ban|họp|hop", normalized):
+                    action = "add_commitment"
+                elif re.search(r"feedback|năng lượng|nang luong|tập trung|tap trung", normalized):
+                    action = "feedback"
+                else:
+                    action = "update_task"
+                data = {
+                    "action": action,
+                    "task_titles": context.get("current_tasks", []),
+                    "planner_message": message,
+                    "confidence": 0.65,
+                    "requires_confirmation": action in {"delete_task", "reschedule"},
+                    "reasoning": "Mock intent extractor dùng cho test và demo offline.",
+                }
+                return StructuredLLMResponse(data, json.dumps(data, ensure_ascii=False), "mock")
             if "messages" in context and "relevant_notes" in schema.get("properties", {}):
                 classified, relevant_notes, ignored = self._mock_gmail_analysis(
                     context.get("messages", [])

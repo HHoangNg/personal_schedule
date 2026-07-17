@@ -6,11 +6,13 @@ from datetime import date, timedelta
 from app.llm.providers import StructuredLLMResponse, build_provider
 from app.reliability.guardrails import confidence, validate_grounding
 from app.schemas import (
+    BehaviorAdvice,
     FocusSession,
     GoalAnalysis,
     ReviewQuestion,
     Risk,
     ScheduleSession,
+    ScheduleExclusion,
     Subtask,
     Task,
     TaskInput,
@@ -54,9 +56,26 @@ CALENDAR_SCHEMA["properties"]["scheduling_intents"] = {
         ],
     },
 }
+CALENDAR_SCHEMA["properties"]["behavior_advice"] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "task_title": {"type": "string"},
+            "recommended_minutes": {"type": "integer", "minimum": 5, "maximum": 480, "nullable": True},
+            "preferred_period": {"type": "string", "enum": ["morning", "afternoon", "evening", "night", "flexible"]},
+            "split_into_sessions": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["task_title", "recommended_minutes", "preferred_period", "split_into_sessions", "confidence", "evidence"],
+    },
+}
 
-DAY_START = 6 * 60
-DAY_END = 22 * 60
+# Safe search bounds only; actual placement is scored from user constraints,
+# LLM scheduling intents and behavior history.
+DAY_START = 5 * 60
+DAY_END = 23 * 60
 PERIODS = {
     "morning": (6 * 60, 12 * 60),
     "afternoon": (12 * 60, 18 * 60),
@@ -71,19 +90,26 @@ class CalendarWorkflow:
         self.settings = settings
         self.provider = build_provider(settings)
 
-    def run(self, request: WorkflowRequest) -> WorkflowResult:
-        response, llm_warnings = self._generate_calendar_analysis(request)
-        data = response.data
-        raw_tasks = [self._validate_task(item) for item in response.data.get("tasks", [])]
+    def run(self, request: WorkflowRequest, behavior_profile: dict | None = None) -> WorkflowResult:
+        response, llm_warnings = self._generate_calendar_analysis(request, behavior_profile)
+        data = self._normalize_llm_data(response.data)
+        warnings = list(llm_warnings)
+        raw_tasks = []
+        for item in data.get("tasks", []):
+            try:
+                raw_tasks.append(self._validate_task(item))
+            except Exception as exc:
+                warnings.append(f"Bỏ qua task LLM sai schema: {type(exc).__name__}: {exc}")
         tasks = self._apply_inputs(
             raw_tasks,
             request.task_inputs,
             f"{request.raw_input}\n{request.planning_notes}",
         )
+        tasks = self._apply_full_schedule_exclusions(tasks, request.schedule_exclusions)
         grounding_text = request.raw_input + " " + " ".join(
             item.deadline_at.date().isoformat() for item in request.task_inputs if item.deadline_at
         )
-        warnings = llm_warnings + validate_grounding(tasks, grounding_text)
+        warnings.extend(validate_grounding(tasks, grounding_text))
         if not tasks:
             warnings.append("Chưa có công việc để xếp lịch.")
         if response.provider == "mock":
@@ -92,14 +118,17 @@ class CalendarWorkflow:
             tasks,
             request,
             self._scheduling_intents(data.get("scheduling_intents", []), tasks),
+            behavior_profile,
         )
+        schedule = self._apply_dated_schedule_exclusions(schedule, request.schedule_exclusions)
         warnings.extend(schedule_warnings)
+        warnings.extend(self._validate_schedule_before_persist(schedule, tasks))
         return WorkflowResult(
             llm_provider=response.provider,
             llm_model=self._model_label(response.provider),
             llm_raw_preview=response.raw_text[:500],
             tasks=tasks,
-            priorities=[{"task": task.title, "score": self._score(task), "reason": self._reason(task)} for task in tasks],
+            priorities=[self._priority_record(task, behavior_profile) for task in tasks],
             subtasks=self._subtasks(tasks, data.get("suggested_subtasks", [])),
             schedule=schedule,
             goal_analysis=self._goal_analysis(data.get("goal_analysis", {})),
@@ -107,15 +136,16 @@ class CalendarWorkflow:
             risks=self._risks(data.get("risks", []), warnings),
             focus_sessions=self._focus_sessions(data.get("focus_sessions", []), warnings),
             review_questions=self._review_questions(data.get("review_questions", []), warnings),
+            adaptation_suggestions=self._behavior_advice(data.get("behavior_advice", []), warnings),
             plan_input=request,
             warnings=warnings,
             needs_confirmation=bool(warnings),
             confidence=confidence(warnings, len(tasks)),
         )
 
-    def _generate_calendar_analysis(self, request: WorkflowRequest) -> tuple[StructuredLLMResponse, list[str]]:
+    def _generate_calendar_analysis(self, request: WorkflowRequest, behavior_profile: dict | None = None) -> tuple[StructuredLLMResponse, list[str]]:
         try:
-            return self.provider.generate_json(self._context(request), CALENDAR_SCHEMA), []
+            return self.provider.generate_json(self._context(request, behavior_profile), CALENDAR_SCHEMA), []
         except Exception as exc:
             response = self._fallback_response(request, exc)
             return response, [
@@ -282,11 +312,16 @@ class CalendarWorkflow:
         return StructuredLLMResponse(data=data, raw_text=raw_text, provider="local-fallback")
 
     @staticmethod
-    def _context(request: WorkflowRequest) -> str:
+    def _context(request: WorkflowRequest, behavior_profile: dict | None = None) -> str:
         return json.dumps({
             "task_text": request.raw_input or ", ".join(item.title for item in request.task_inputs),
             "structured_tasks": [item.model_dump(mode="json") for item in request.task_inputs],
             "additional_information": request.planning_notes,
+            "behavior_profile": behavior_profile or {
+                "sample_days": 0,
+                "message": "Chưa có lịch sử thực thi; không suy luận thói quen người dùng.",
+            },
+            "retrieved_personal_memory": request.memory_context,
             "calendar_rules": {
                 "horizon_days": 14,
                 "remaining_time": "fill daytime gaps with personal time and night gaps with rest",
@@ -297,6 +332,11 @@ class CalendarWorkflow:
                     "Use null preferred_start_time when there is no explicit or strongly implied time. "
                     "These intents guide the scheduler; avoid hard-coded defaults unless evidence is weak."
                 ),
+                "behavior_advice": (
+                    "When behavior_profile has enough history, return advice for tasks: recommended_minutes, "
+                    "preferred_period, whether to split sessions, confidence, and concrete evidence. "
+                    "Do not invent evidence; return an empty list when there is not enough history."
+                ),
             },
         }, ensure_ascii=False)
 
@@ -306,6 +346,80 @@ class CalendarWorkflow:
         if isinstance(normalized.get("deadline"), str) and "T" in normalized["deadline"]:
             normalized["deadline"] = normalized["deadline"].split("T", maxsplit=1)[0]
         return Task.model_validate(normalized)
+
+    @staticmethod
+    def _normalize_llm_data(data: dict) -> dict:
+        """Normalize common provider wrappers and Vietnamese enum values before scheduling."""
+        if not isinstance(data, dict):
+            return {"tasks": []}
+        nested = data.get("plan") if isinstance(data.get("plan"), dict) else {}
+        normalized = {**nested, **data}
+        raw_tasks = normalized.get("tasks") or nested.get("tasks") or []
+        tasks = []
+        deadline_modes = {
+            "hàng ngày": "daily", "hang ngay": "daily", "daily": "daily",
+            "cụ thể": "specific", "cu the": "specific", "specific": "specific",
+            "không đặt": "none", "khong dat": "none", "none": "none",
+        }
+        priorities = {
+            "thấp": "low", "thap": "low", "low": "low",
+            "trung bình": "medium", "trung binh": "medium", "medium": "medium",
+            "cao": "high", "high": "high",
+        }
+        for item in raw_tasks if isinstance(raw_tasks, list) else []:
+            if not isinstance(item, dict):
+                continue
+            task = dict(item)
+            task["title"] = str(task.get("title") or task.get("task") or task.get("name") or "").strip()
+            if not task["title"]:
+                continue
+            deadline = task.get("deadline") or task.get("deadline_at")
+            if isinstance(deadline, str) and "T" in deadline:
+                deadline = deadline.split("T", maxsplit=1)[0]
+            task["deadline"] = deadline
+            task["deadline_mode"] = deadline_modes.get(
+                str(task.get("deadline_mode") or ("specific" if deadline else "none")).casefold(),
+                "specific" if deadline else "none",
+            )
+            task["priority"] = priorities.get(str(task.get("priority") or "medium").casefold(), "medium")
+            task["estimated_minutes"] = int(task.get("estimated_minutes") or 30)
+            task["occurrences_per_day"] = int(task.get("occurrences_per_day") or 1)
+            tasks.append(task)
+        normalized["tasks"] = tasks
+        return normalized
+
+    @staticmethod
+    def _validate_schedule_before_persist(
+        schedule: list[ScheduleSession], tasks: list[Task]
+    ) -> list[str]:
+        """Check the generated calendar before it is returned for persistence."""
+        warnings: list[str] = []
+        by_date: dict[date, list[tuple[int, int, ScheduleSession]]] = {}
+        task_deadlines = {task.title.casefold().strip(): task.deadline for task in tasks if task.deadline}
+        for block in schedule:
+            try:
+                start_hour, start_minute = map(int, block.start_time.split(":"))
+                end_hour, end_minute = map(int, block.end_time.split(":"))
+                start = start_hour * 60 + start_minute
+                end = end_hour * 60 + end_minute
+            except (AttributeError, ValueError):
+                warnings.append(f"Khối lịch của '{block.task_title}' có giờ không hợp lệ.")
+                continue
+            if end <= start:
+                warnings.append(f"Khối lịch của '{block.task_title}' có thời gian kết thúc trước hoặc bằng bắt đầu.")
+                continue
+            by_date.setdefault(block.date, []).append((start, end, block))
+            deadline = task_deadlines.get(block.task_title.casefold().strip())
+            if deadline and block.date > deadline:
+                warnings.append(f"Khối '{block.task_title}' được xếp sau deadline {deadline.isoformat()}.")
+        for blocks in by_date.values():
+            blocks.sort(key=lambda item: item[0])
+            for previous, current in zip(blocks, blocks[1:]):
+                if previous[1] > current[0]:
+                    warnings.append(
+                        f"Phát hiện khối lịch chồng lấn: '{previous[2].task_title}' và '{current[2].task_title}'."
+                    )
+        return warnings
 
     @staticmethod
     def _apply_inputs(tasks: list[Task], inputs: list[TaskInput], additional: str) -> list[Task]:
@@ -341,6 +455,44 @@ class CalendarWorkflow:
                 result.append(task)
                 existing.add(task.title.casefold())
         return result
+
+    @staticmethod
+    def _apply_full_schedule_exclusions(
+        tasks: list[Task], exclusions: list[ScheduleExclusion]
+    ) -> list[Task]:
+        deleted_titles = {
+            exclusion.task_title.casefold().strip()
+            for exclusion in exclusions
+            if exclusion.from_date is None
+        }
+        if not deleted_titles:
+            return tasks
+        return [task for task in tasks if task.title.casefold().strip() not in deleted_titles]
+
+    @staticmethod
+    def _apply_dated_schedule_exclusions(
+        schedule: list[ScheduleSession], exclusions: list[ScheduleExclusion]
+    ) -> list[ScheduleSession]:
+        dated = [exclusion for exclusion in exclusions if exclusion.from_date is not None]
+        if not dated:
+            return schedule
+
+        def should_remove(block: ScheduleSession) -> bool:
+            if block.block_type not in {"task", "work"}:
+                return False
+            title = block.task_title.casefold().strip()
+            return any(
+                block.date >= exclusion.from_date
+                and title == exclusion.task_title.casefold().strip()
+                for exclusion in dated
+            )
+
+        kept_work = [
+            block
+            for block in schedule
+            if block.block_type in {"task", "work"} and not should_remove(block)
+        ]
+        return CalendarWorkflow._fill_default_blocks_clean(kept_work)
 
     @staticmethod
     def _drop_note_like_tasks(tasks: list[Task], inferred: list[Task], text: str) -> list[Task]:
@@ -537,6 +689,35 @@ class CalendarWorkflow:
     def _reason(task: Task) -> str:
         return "AI đánh giá ưu tiên cao hơn và có deadline" if task.deadline else "AI đánh giá theo tác động mục tiêu"
 
+    @classmethod
+    def _priority_record(cls, task: Task, behavior_profile: dict | None = None) -> dict:
+        profile = behavior_profile or {}
+        adjustments = profile.get("priority_adjustments", {}) if profile.get("enough_data_for_auto_apply") else {}
+        adjustment = int(adjustments.get(task.title, 0))
+        evidence = list(profile.get("priority_evidence", {}).get(task.title, []))
+        return {"task": task.title, "score": max(0, min(100, cls._score(task) + adjustment)),
+                "reason": cls._reason(task), "evidence": evidence,
+                "history_adjustment": adjustment}
+
+    @staticmethod
+    def _behavior_advice(items: list[dict], warnings: list[str]) -> list[BehaviorAdvice]:
+        result: list[BehaviorAdvice] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                result.append(BehaviorAdvice.model_validate({
+                    "task_title": item.get("task_title") or item.get("task") or "Công việc",
+                    "recommended_minutes": item.get("recommended_minutes"),
+                    "preferred_period": item.get("preferred_period") or "flexible",
+                    "split_into_sessions": bool(item.get("split_into_sessions", False)),
+                    "confidence": item.get("confidence", 0),
+                    "evidence": [str(value) for value in item.get("evidence", []) if str(value).strip()],
+                }))
+            except Exception as exc:
+                warnings.append(f"Bỏ qua một đề xuất thích nghi không hợp lệ: {type(exc).__name__}: {exc}")
+        return result
+
     @staticmethod
     def _subtasks(tasks: list[Task], suggestions: list[dict]) -> dict[str, list[Subtask]]:
         result = {task.title: [] for task in tasks}
@@ -603,6 +784,7 @@ class CalendarWorkflow:
         tasks: list[Task],
         request: WorkflowRequest,
         intents: dict[str, dict] | None = None,
+        behavior_profile: dict | None = None,
     ) -> tuple[list[ScheduleSession], list[str]]:
         today = date.today()
         occupied: dict[date, list[tuple[int, int, Task | None]]] = {}
@@ -642,7 +824,7 @@ class CalendarWorkflow:
                     ])
 
         def add_task(task: Task, day: date, occurrence_index: int = 0) -> bool:
-            max_end = 22 * 60
+            max_end = DAY_END
             if task.deadline and day == task.deadline and task.deadline_time:
                 max_end = task.deadline_time.hour * 60 + task.deadline_time.minute
             busy = occupied.setdefault(day, [])
@@ -669,7 +851,9 @@ class CalendarWorkflow:
                 return True
             return False
 
-        ordered = sorted(tasks, key=lambda task: (-cls._score(task), task.title))
+        profile = behavior_profile or {}
+        adjustments = profile.get("priority_adjustments", {}) if profile.get("enough_data_for_auto_apply") else {}
+        ordered = sorted(tasks, key=lambda task: (-(cls._score(task) + int(adjustments.get(task.title, 0))), task.title))
         for task in ordered:
             intent = intents.get(task.title.casefold(), {})
             days = [today + timedelta(days=index) for index in range(14)]

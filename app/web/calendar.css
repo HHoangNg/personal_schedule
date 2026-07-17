@@ -15,13 +15,17 @@ h4 { font-size: .85rem; letter-spacing: .08em; text-transform: uppercase; }
 .selected-user { font-size: .95rem; font-weight: 750; margin: 6px 0 0; }
 .user-chip, .status { background: #e8edff; border-radius: 99px; color: #4338ca; font-size: .8rem; font-weight: 700; padding: 9px 13px; }
 .setup-card, .calendar-card { background: white; border: 1px solid #e2e8f0; border-radius: 22px; box-shadow: 0 18px 50px #243b6b12; padding: 26px; }
-.calendar-card { margin-top: 22px; }
+.calendar-card, .feedback-card, .assistant-card { margin-top: 22px; }
+.assistant-card { background: linear-gradient(135deg, #eef2ff, #f8fafc); border: 1px solid #c7d2fe; border-radius: 22px; box-shadow: 0 18px 50px #243b6b12; padding: 26px; }
+.assistant-result { color: #334155; min-height: 22px; margin: 12px 0 0; }
+.feedback-card { background: white; border: 1px solid #e2e8f0; border-radius: 22px; box-shadow: 0 18px 50px #243b6b12; padding: 26px; }
 .hint { font-size: .8rem; }
 form { display: grid; gap: 15px; margin-top: 22px; }
 label { color: #334155; display: grid; font-size: .84rem; font-weight: 750; gap: 7px; }
 input, select, textarea { background: #fff; border: 1px solid #ccd6e5; border-radius: 10px; color: #172033; font: inherit; padding: 12px 13px; width: 100%; }
 input:focus, select:focus, textarea:focus { border-color: #6366f1; box-shadow: 0 0 0 3px #e0e7ff; outline: 0; }
 .identity-grid, .task-fields, .gmail-actions { display: grid; gap: 13px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.feedback-grid { display: grid; gap: 13px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .gmail-actions { align-items: end; background: #f8fafc; border: 1px solid #d9e1ee; border-radius: 15px; padding: 16px; }
 .task-heading { margin-top: 12px; }
 .task-heading h3 { color: #334155; }
@@ -34,6 +38,7 @@ button { border: 0; border-radius: 10px; cursor: pointer; font: inherit; font-we
 .primary-button:hover { background: #4338ca; }
 .outline-button { background: #eef2ff; color: #4338ca; }
 .calendar-heading { margin-bottom: 22px; }
+.calendar-tools { align-items: center; display: flex; gap: 10px; }
 .day-tabs { display: grid; gap: 8px; grid-template-columns: repeat(14, minmax(60px, 1fr)); overflow-x: auto; }
 .day-tab { background: #f8fafc; border: 1px solid #e1e7f0; color: #64748b; display: grid; gap: 4px; min-width: 64px; padding: 10px 5px; }
 .day-tab span { font-size: .85rem; }
@@ -47,11 +52,18 @@ button { border: 0; border-radius: 10px; cursor: pointer; font: inherit; font-we
 .time-block time { color: #536176; font-size: .78rem; font-weight: 800; line-height: 1.4; min-width: 58px; }
 .time-block time span { color: #94a3b8; }
 .time-block strong, .time-block small { display: block; }
+.block-content { flex: 1; }
+.block-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
+.block-actions button { background: #fff; border: 1px solid #cbd5e1; color: #475569; font-size: .7rem; padding: 7px 8px; }
+.block-actions button:hover { background: #eef2ff; color: #4338ca; }
 .time-block small { color: #758197; font-size: .78rem; margin-top: 4px; }
 .time-block.task { background: #eef2ff; border-color: #4f46e5; }
 .time-block.personal { background: #f0fdf4; border-color: #22c55e; }
 .time-block.work { background: #fff7ed; border-color: #f97316; }
 .time-block.rest { background: #f8fafc; border-color: #94a3b8; }
+.time-block.status-completed { opacity: .72; }
+.time-block.status-completed strong { text-decoration: line-through; }
+.time-block.status-skipped, .time-block.status-rescheduled { opacity: .65; }
 .empty-calendar { background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 14px; color: #64748b; padding: 38px; text-align: center; }
 .hidden { display: none; }
-@media (max-width: 720px) { .app-shell { padding: 30px 14px 50px; } .topbar, .section-title, .calendar-heading { align-items: flex-start; flex-direction: column; } .identity-grid, .task-fields, .gmail-actions { grid-template-columns: 1fr; } .day-tabs { grid-template-columns: repeat(14, 64px); } }
+@media (max-width: 720px) { .app-shell { padding: 30px 14px 50px; } .topbar, .section-title, .calendar-heading { align-items: flex-start; flex-direction: column; } .identity-grid, .task-fields, .gmail-actions, .feedback-grid { grid-template-columns: 1fr; } .day-tabs { grid-template-columns: repeat(14, 64px); } .time-block { align-items: flex-start; flex-wrap: wrap; } .block-actions { justify-content: flex-start; width: 100%; } }

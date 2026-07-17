@@ -6,7 +6,15 @@ const saveButton = document.querySelector("#save-button");
 const dayTabs = document.querySelector("#day-tabs");
 const dayView = document.querySelector("#day-view");
 const status = document.querySelector("#calendar-status");
+const feedbackForm = document.querySelector("#feedback-form");
+const recalculateButton = document.querySelector("#recalculate-button");
+const assistantForm = document.querySelector("#assistant-form");
+const assistantButton = document.querySelector("#assistant-button");
+const assistantMessage = document.querySelector("#assistant-message");
+const assistantResult = document.querySelector("#assistant-result");
 let currentPlanExists = false;
+let currentPlanId = "";
+let currentPlanData = null;
 
 const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#039;", '"': "&quot;"
@@ -57,11 +65,24 @@ function renderDay(data, selectedDate) {
   dayView.innerHTML = `<div class="selected-day"><h3>${new Date(`${selectedDate}T12:00:00`).toLocaleDateString("vi-VN", { weekday: "long", day: "numeric", month: "long" })}</h3></div>${groups.map((period) => {
     const periodBlocks = blocks.filter((item) => item.period === period);
     if (!periodBlocks.length) return "";
-    return `<section class="period"><h4>${periodLabel(period)}</h4><div class="block-list">${periodBlocks.map((block) => `<div class="time-block ${block.block_type}"><time>${block.start_time}<br /><span>${block.end_time}</span></time><div><strong>${escapeHtml(block.task_title)}</strong><small>${block.minutes} phút${block.block_type === "task" ? " · Công việc" : ""}</small></div></div>`).join("")}</div></section>`;
+    return `<section class="period"><h4>${periodLabel(period)}</h4><div class="block-list">${periodBlocks.map((block) => `<div class="time-block ${block.block_type} status-${block.status || "planned"}"><time>${block.start_time}<br /><span>${block.end_time}</span></time><div class="block-content"><strong>${escapeHtml(block.task_title)}</strong><small>${block.minutes} phút${block.block_type === "task" ? ` · ${statusLabel(block.status)}` : ""}</small></div>${block.block_type === "task" ? `<div class="block-actions"><button type="button" data-status="completed" data-block-id="${block.block_id}">Xong</button><button type="button" data-status="partial" data-block-id="${block.block_id}">Một phần</button><button type="button" data-status="skipped" data-block-id="${block.block_id}">Bỏ qua</button><button type="button" data-status="rescheduled" data-block-id="${block.block_id}">Dời</button></div>` : ""}</div>`).join("")}</div></section>`;
   }).join("")}`;
+  dayView.querySelectorAll(".block-actions button").forEach((button) => button.addEventListener("click", () => updateBlockStatus(data, button.dataset.blockId, button.dataset.status)));
+}
+
+function statusLabel(status) {
+  return { planned: "Chưa thực hiện", completed: "Đã hoàn thành", partial: "Hoàn thành một phần", skipped: "Đã bỏ qua", rescheduled: "Đã dời lịch" }[status || "planned"] || status;
+}
+
+function localDateString() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
 function renderCalendar(data) {
+  currentPlanData = data;
+  currentPlanId = data.plan_id || "";
   const displayName = data.plan_input?.display_name || document.querySelector("#display-name").value.trim() || data.plan_input?.user_id || "";
   const userName = document.querySelector("#calendar-user-name");
   if (userName) userName.textContent = displayName ? `Của ${displayName}` : "";
@@ -79,6 +100,35 @@ function renderCalendar(data) {
   status.textContent = "Đã lưu";
   currentPlanExists = true;
   updateSaveButtonMode();
+  loadAnalytics();
+}
+
+async function updateBlockStatus(data, blockId, blockStatus) {
+  if (!currentPlanId) return;
+  let actualMinutes = null;
+  let reason = "";
+  if (blockStatus === "partial") actualMinutes = Number(window.prompt("Bạn đã làm được bao nhiêu phút?", "15") || 0);
+  if (blockStatus === "skipped" || blockStatus === "rescheduled") reason = window.prompt("Lý do hoặc ghi chú:", "") || "";
+  try {
+    const response = await fetch(`/v1/schedule/${encodeURIComponent(currentPlanId)}/blocks/${encodeURIComponent(blockId)}/status?user_id=${encodeURIComponent(document.querySelector("#user-id").value.trim())}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: blockStatus, actual_minutes: actualMinutes, reason }),
+    });
+    if (!response.ok) throw new Error("Không thể lưu trạng thái công việc");
+    renderCalendar(await response.json());
+    status.textContent = "Đã ghi nhận thực tế";
+  } catch (error) { status.textContent = error.message; }
+}
+
+async function loadAnalytics() {
+  const userId = document.querySelector("#user-id").value.trim();
+  if (!userId) return;
+  try {
+    const response = await fetch(`/v1/analytics/productivity?user_id=${encodeURIComponent(userId)}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    document.querySelector("#analytics-summary").textContent = `Hoàn thành ${Math.round((data.profile.completion_rate || 0) * 100)}% · ${data.profile.effective_period}`;
+  } catch (_) { /* Analytics không được làm hỏng lịch */ }
 }
 
 function resetTaskInputs() {
@@ -117,6 +167,80 @@ addTaskRow();
 loadCalendar();
 document.querySelector("#user-id").addEventListener("change", loadCalendar);
 document.querySelector("#user-id").addEventListener("blur", loadCalendar);
+
+assistantForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const userId = document.querySelector("#user-id").value.trim();
+  const message = assistantMessage.value.trim();
+  if (!userId || message.length < 3) {
+    assistantResult.textContent = "Hãy nhập mã người dùng và yêu cầu muốn AI xử lý.";
+    return;
+  }
+  assistantButton.disabled = true;
+  assistantButton.textContent = "AI đang suy luận…";
+  assistantResult.textContent = "Đang lấy lịch sử cá nhân và phân tích yêu cầu…";
+  try {
+    const response = await fetch("/v1/assistant/message", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId, display_name: document.querySelector("#display-name").value.trim(), message }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Không thể xử lý yêu cầu với trợ lý AI");
+    if (data.plan) {
+      renderCalendar(data.plan);
+      resetTaskInputs();
+    }
+    const intent = data.intent || {};
+    assistantResult.textContent = `AI đã nhận dạng: ${intent.action || "chưa rõ"} · độ tin cậy ${Math.round((intent.confidence || 0) * 100)}%${intent.requires_confirmation ? " · thay đổi lớn nên được kiểm tra lại" : ""}`;
+    assistantMessage.value = "";
+  } catch (error) {
+    assistantResult.textContent = error.message;
+  } finally {
+    assistantButton.disabled = false;
+    assistantButton.textContent = "AI hiểu và cập nhật lịch";
+  }
+});
+
+recalculateButton.addEventListener("click", async () => {
+  const userId = document.querySelector("#user-id").value.trim();
+  if (!userId || !currentPlanId) { status.textContent = "Hãy tạo lịch trước khi đánh giá lại"; return; }
+  recalculateButton.disabled = true;
+  recalculateButton.textContent = "AI đang phân tích…";
+  try {
+    const response = await fetch("/v1/workflow/recalculate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId, confirm_advice: true }),
+    });
+    if (!response.ok) throw new Error("Không thể đánh giá lại lịch");
+    renderCalendar(await response.json());
+    status.textContent = "Đã áp dụng phân tích từ lịch sử thực tế";
+  } catch (error) { status.textContent = error.message; }
+  finally { recalculateButton.disabled = false; recalculateButton.textContent = "AI đánh giá lại"; }
+});
+
+feedbackForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const userId = document.querySelector("#user-id").value.trim();
+  if (!userId) { status.textContent = "Hãy nhập mã người dùng trước"; return; }
+  try {
+    const response = await fetch("/v1/feedback/daily", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        feedback_date: localDateString(),
+        energy: Number(document.querySelector("#feedback-energy").value),
+        focus: Number(document.querySelector("#feedback-focus").value),
+        effective_period: document.querySelector("#feedback-period").value,
+        schedule_feeling: document.querySelector("#feedback-feeling").value,
+        procrastinated_tasks: document.querySelector("#feedback-procrastinated").value.split(",").map((item) => item.trim()).filter(Boolean),
+        note: document.querySelector("#feedback-note").value.trim(),
+      }),
+    });
+    if (!response.ok) throw new Error("Không thể lưu feedback");
+    status.textContent = "Đã lưu feedback; AI sẽ dùng dữ liệu này ở lần cập nhật lịch tiếp theo";
+    loadAnalytics();
+  } catch (error) { status.textContent = error.message; }
+});
 
 scanGmailButton.addEventListener("click", async () => {
   const userId = document.querySelector("#user-id").value.trim();

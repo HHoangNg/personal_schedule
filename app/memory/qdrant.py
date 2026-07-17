@@ -38,4 +38,18 @@ class QdrantMemory:
         )
 
     def search(self, vector: list[float], limit: int = 5):
-        return self.client.query_points(collection_name=self.collection, query=vector, limit=limit).points
+        return self.client.query_points(
+            collection_name=self.collection,
+            query=(self.vector_name, vector),
+            limit=limit,
+        ).points
+
+    def delete_by_user(self, user_id: str) -> None:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        self.client.delete(
+            collection_name=self.collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+            ),
+        )
