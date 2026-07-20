@@ -1,36 +1,29 @@
 # AI Personal Productivity OS
 
-AI Personal Productivity OS is an AI-powered personal scheduling system. Users enter tasks, deadlines, personal notes or scan Gmail; the system uses GPT/Gemini to analyze needs, build a 14-day schedule, save plans and synchronize data to Qdrant as personal memory.
+AI Personal Productivity OS is an AI-powered personal scheduling system. It builds a 14-day plan from tasks, deadlines and notes, with optional Gmail and Google Calendar imports.
 
 ## What does the system do?
 
-The application turns scattered information such as “study English every evening”, “cook three meals”, or “there is a meeting scheduled by email” into a daily schedule. Each user has one schedule identified by `user_id`; updates preserve previous criteria and combine them with new requests.
+Each user has one current plan identified by `user_id`. A submitted task form replaces the previous task list; an update containing only additional notes keeps the existing tasks. The application records execution and feedback to improve later suggestions.
 
 ## Main features
 
-- Create and edit a 14-day schedule for each user.
-- Add tasks in separate fields with duration and deadline.
-- Support daily deadlines or specific date-and-time deadlines.
-- Update the schedule using only the “Additional information” field.
-- Scan Gmail in read-only mode for recent schedule-related emails.
-- Use OpenAI, Gemini or a comparison mode using both providers.
-- Automatically schedule tasks according to priority, duration, deadlines and personal constraints.
-- Store schedules in SQLite, JSON files and Qdrant.
-- Record real execution for each block: completed, skipped, rescheduled or partial.
-- Collect daily feedback, performance statistics and a user-specific behavior profile.
-- Use real history to provide priority evidence, effective periods, duration estimates and task-splitting suggestions.
-- Include guardrails, tests and evaluations to reduce LLM hallucinations.
+- Create a conflict-aware 14-day schedule with priorities, durations and deadlines.
+- Lock schedule blocks and generate reviewable recalculation proposals without automatically moving locked blocks.
+- Scan Gmail and import Google Calendar events in read-only mode.
+- Use OpenAI, Gemini, comparison mode or the local `mock` provider.
+- Store plans, execution records, feedback and decision audit data in SQLite/JSON.
+- Optionally synchronize personal memory to Qdrant.
+- Provide productivity analytics, feedback learning, guardrails, tests and evaluations.
 
 ## Personalization loop
 
 ```text
-AI proposes a schedule → the user records actual status → daily feedback
-→ BehaviorProfile → AI reevaluates priorities and periods at the next update
+AI proposes a schedule → user records actual status → daily feedback
+→ BehaviorProfile → AI reevaluates the next update
 ```
 
-After at least 7 feedback days or 5 execution records, the system can use behavior data
-to automatically adjust the schedule. Before that threshold, the data is used only for
-statistics and supporting evidence.
+After at least 7 feedback days or 5 execution records, behavior data can adjust the schedule. Before that threshold, it is used for statistics and supporting evidence.
 
 ## Architecture
 
@@ -38,51 +31,41 @@ statistics and supporting evidence.
 app/
   api/            # FastAPI routes
   core/           # application configuration
-  integrations/   # Gmail integration
-  llm/            # OpenAI, Gemini and comparison provider
-  memory/         # Voyage embeddings + Qdrant
+  integrations/   # Gmail and read-only Google Calendar connectors
+  llm/            # OpenAI, Gemini, comparison and mock providers
+  memory/         # optional Voyage embeddings + Qdrant
   reliability/    # guardrails and confidence
   storage/        # SQLite + JSON repository
   web/            # Vietnamese web interface
-  workflow/       # analysis and scheduling logic
+  workflow/       # analysis, scheduling and proposal logic
 tests/            # unit and integration tests
 evals/            # golden-set evaluation
 ```
 
 ## Technologies
 
-- FastAPI, Pydantic
-- OpenAI API, Gemini API
-- Voyage embeddings
-- Qdrant vector database
-- SQLite + JSON persistence
-- Gmail API OAuth read-only access
-- Docker, pytest, ruff
+- FastAPI, Pydantic, SQLite and JSON persistence
+- OpenAI API, Gemini API and local mock provider
+- Optional Voyage embeddings and Qdrant vector database
+- Gmail API OAuth and Google Calendar API OAuth (both read-only)
+- Docker Compose, GitHub Actions, pytest and ruff
 
 ## Installation
 
 ```powershell
 python -m venv .personal_schedule
 .\.personal_schedule\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python -m pip install -e ".[dev]"
 copy .env.example .env
 ```
 
-Set the required API keys in `.env`:
+`.env` is local-only and must never be committed. Safe defaults are:
 
 ```env
-LLM_PROVIDER=gemini
-OPENAI_API_KEY=
-GEMINI_API_KEY=
-
-QDRANT_URL=
-QDRANT_API_KEY=
-QDRANT_COLLECTION=personal_productivity_memory
-QDRANT_VECTOR_SIZE=1024
-QDRANT_VECTOR_NAME=dense
-
-VOYAGE_API_KEY=
-VOYAGE_MODEL=voyage-3.5
+LLM_PROVIDER=mock
+QDRANT_SYNC_ENABLED=false
+DATABASE_PATH=data/productivity.db
 ```
 
 ## Run the application
@@ -97,76 +80,50 @@ Open the interface:
 http://localhost:8000/
 ```
 
-API documentation:
+API documentation and health check:
 
 ```text
 http://localhost:8000/docs
+http://localhost:8000/health
 ```
 
 ## Choose an LLM
 
 ```env
+LLM_PROVIDER=mock
 LLM_PROVIDER=openai
 LLM_PROVIDER=gemini
 LLM_PROVIDER=compare
 ```
 
-- `openai`: use GPT only.
-- `gemini`: use Gemini only.
-- `compare`: call both GPT and Gemini for comparison.
+- `mock`: deterministic local provider; used by CI.
+- `openai`: requires `OPENAI_API_KEY`.
+- `gemini`: requires `GEMINI_API_KEY`.
+- `compare`: requires both keys.
 
 ## Gmail
 
-To scan Gmail:
+To scan Gmail, enable the Gmail API, create a Desktop OAuth client and store its credentials at `secrets/gmail_credentials.json`. The first scan opens OAuth; Gmail access is read-only.
 
-1. Enable the Gmail API in Google Cloud Console.
-2. Create an OAuth Client of type Desktop app.
-3. Store the credentials file at:
-
-```text
-secrets/gmail_credentials.json
-```
-
-Add the following to `.env`:
-
-```env
-GMAIL_CREDENTIALS_PATH=secrets/gmail_credentials.json
-GMAIL_TOKEN_PATH=data/gmail_token.json
-GMAIL_SCAN_DAYS=3
-GMAIL_MAX_RESULTS=50
-```
-
-The first time you click “Scan Gmail and update schedule”, the browser opens OAuth so you can choose a Gmail account.
+For Google Calendar, enable Calendar API, store a Desktop OAuth credential at `secrets/google_calendar_credentials.json`, then call `POST /v1/integrations/calendar/google/connect` once. Call `POST /v1/integrations/calendar/google/sync` to import events. The token is stored locally in `data/google_calendar_token.json`; the integration never edits Google events.
 
 ## Qdrant
 
-Schedules are stored locally in SQLite/JSON. The payload is then embedded with Voyage and upserted to Qdrant.
-
-Recommended Qdrant collection:
-
-```text
-collection: personal_productivity_memory
-vector name: dense
-vector size: 1024
-distance: Cosine
-```
-
-Feedback and execution logs are also embedded and stored in the same collection, with payload fields such as
-`user_id`, `plan_id`, `block_id` or the feedback date. SQLite/JSON remains the source of truth;
-Qdrant provides personal-memory retrieval and does not make the application lose data when the cloud service is temporarily unavailable.
+SQLite/JSON is the source of truth. When `QDRANT_SYNC_ENABLED=true` and Qdrant/Voyage credentials are configured, the application also synchronizes personal-memory payloads to Qdrant. A Qdrant outage does not prevent a local schedule from being saved.
 
 ## APIs for real-world tracking
 
 - `POST /v1/schedule/{plan_id}/blocks/{block_id}/status`: update status and actual duration.
-- `POST /v1/feedback/daily`: save energy, focus, effective period and procrastination reasons.
-- `GET /v1/analytics/productivity?user_id=...`: view completion, delay and behavior statistics.
-- `GET /v1/profile?user_id=...`: get the current personalization profile.
-- `POST /v1/workflow/recalculate`: rebuild the current schedule using behavior history while preserving `plan_id`.
-- `DELETE /v1/profile/{user_id}`: delete the user's schedule, feedback and execution logs.
+- `POST /v1/schedule/{plan_id}/blocks/{block_id}/lock`: lock or unlock a block.
+- `POST /v1/feedback/daily`: save feedback.
+- `GET /v1/analytics/productivity?user_id=...`: view statistics.
+- `GET /v1/profile?user_id=...`: get the personalization profile.
+- `POST /v1/workflow/proposals/recalculate`: create a reviewable recalculation proposal.
+- `DELETE /v1/profile/{user_id}`: delete the user's stored records.
 
 ## AI conversational assistant
 
-Users can enter natural-language requests in Vietnamese to create, edit, delete or reschedule items. The AI retrieves personal memory, classifies the intent, updates the current schedule and stores a decision audit.
+Users can enter Vietnamese requests to create, edit, delete or reschedule items. The assistant updates the current schedule and stores a decision audit.
 
 ```text
 POST /v1/assistant/message
@@ -175,17 +132,7 @@ GET  /v1/decisions?user_id=...
 POST /v1/schedule/apply-suggestion
 ```
 
-Example:
-
-```json
-{
-  "user_id": "demo-user",
-  "message": "From tomorrow I no longer want to study mathematics; keep the other tasks."
-}
-```
-
-GPT/Gemini are compared only when `LLM_PROVIDER=compare` is configured. If the LLM or Qdrant fails,
-the local schedule is still saved and the response contains a warning.
+If an LLM or Qdrant is unavailable, the local schedule is still saved and the response contains a warning.
 
 ## Docker
 
@@ -193,17 +140,21 @@ the local schedule is still saved and the response contains a warning.
 docker compose up --build
 ```
 
-Or build the image manually:
+Compose keeps SQLite and OAuth token data in the `api_data` volume, uses `LLM_PROVIDER=mock` and disables Qdrant sync by default. Start optional Qdrant with:
 
 ```powershell
-docker build -t personal-schedule-ai .
-docker run --env-file .env -p 8000:8000 personal-schedule-ai
+docker compose --profile qdrant up --build
 ```
+
+The API checks `/health` and restarts with `unless-stopped`. Production secrets must come from a secret manager or a read-only mount; do not put them in the image or repository.
 
 ## Checks
 
 ```powershell
-ruff check .
+ruff check app tests evals
 python -m pytest
 python -m evals.run --dataset evals/data/golden.jsonl
+docker compose config --quiet
 ```
+
+GitHub Actions runs these checks with the mock provider. A push to `main` publishes `ghcr.io/hhoangng/personal_schedule:latest`; the image job requires `packages: write`.
