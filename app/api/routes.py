@@ -5,19 +5,26 @@ from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.settings import Settings, get_settings
+from app.integrations.calendar import CalendarConnectorConfig, GoogleCalendarConnector
 from app.integrations.gmail import GmailScheduleImporter
+from app.reliability.scheduling_policy import build_recalculate_proposal
 from app.schemas import (
     AssistantIntent,
     AssistantMessageRequest,
     AssistantMessageResponse,
+    CalendarSyncRequest,
+    CalendarSyncResult,
     DailyFeedback,
     DecisionAudit,
     ExecutionStatusRequest,
     GmailScanRequest,
+    LockBlockRequest,
     PlanSummary,
     ProductivityAnalytics,
     RecalculateRequest,
     ScheduleExclusion,
+    ScheduleProposal,
+    ScheduleProposalRequest,
     SuggestionApplyRequest,
     TaskInput,
     WorkflowRequest,
@@ -407,6 +414,28 @@ def update_block_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/schedule/{plan_id}/blocks/{block_id}/lock", response_model=WorkflowResult)
+def lock_schedule_block(
+    plan_id: str,
+    block_id: str,
+    request: LockBlockRequest,
+    user_id: str = Query(min_length=1),
+    settings: Settings = Depends(get_settings),
+):
+    repo = repository(settings)
+    try:
+        plan = repo.set_block_lock(user_id, plan_id, block_id, request.locked, request.reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    repo.record_decision(DecisionAudit(
+        user_id=user_id, plan_id=plan.plan_id, action="lock_schedule_block",
+        message=block_id, provider="user", confidence=1.0, applied=True,
+        reasoning="Người dùng thay đổi trạng thái khóa của khung giờ.",
+        policy="user-lock", risk="low", change_summary="Khóa khung giờ" if request.locked else "Mở khóa khung giờ",
+    ))
+    return plan
+
+
 @router.post("/feedback/daily", response_model=DailyFeedback)
 def save_daily_feedback(feedback: DailyFeedback, settings: Settings = Depends(get_settings)):
     return repository(settings).save_daily_feedback(feedback)
@@ -424,6 +453,25 @@ def schedule_insights(
     user_id: str = Query(min_length=1), settings: Settings = Depends(get_settings)
 ):
     return repository(settings).analytics(user_id)
+
+
+@router.post("/workflow/proposals/recalculate", response_model=ScheduleProposal)
+def propose_recalculation(
+    request: ScheduleProposalRequest, settings: Settings = Depends(get_settings)
+):
+    repo = repository(settings)
+    existing = current_plan(repo, request.user_id)
+    if not existing or not existing.plan_id:
+        raise HTTPException(status_code=404, detail="Người dùng chưa có lịch để đánh giá lại.")
+    proposal = repo.save_proposal(build_recalculate_proposal(request.user_id, existing, request.trigger))
+    repo.record_decision(DecisionAudit(
+        user_id=request.user_id, plan_id=existing.plan_id, action="schedule_proposal",
+        message=request.trigger, provider="policy", confidence=0.7, applied=False,
+        requires_confirmation=True, reasoning=proposal.reasoning,
+        policy="proposal-first", risk=proposal.risk,
+        change_summary=json.dumps(proposal.changes, ensure_ascii=False),
+    ))
+    return proposal
 
 
 @router.get("/decisions", response_model=list[DecisionAudit])
@@ -484,6 +532,48 @@ def recalculate(request: RecalculateRequest, settings: Settings = Depends(get_se
     profile = repo.behavior_profile(request.user_id).model_dump(mode="json")
     plan = CalendarWorkflow(settings).run(existing.plan_input, profile)
     return repo.save(request.user_id, plan)
+
+
+def _google_connector(settings: Settings) -> GoogleCalendarConnector:
+    return GoogleCalendarConnector(CalendarConnectorConfig(
+        credentials_path=settings.google_calendar_credentials_path,
+        token_path=settings.google_calendar_token_path,
+    ))
+
+
+@router.post("/integrations/calendar/google/connect")
+def connect_google_calendar(settings: Settings = Depends(get_settings)):
+    try:
+        _google_connector(settings).authorize_interactively()
+    except (FileNotFoundError, PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Không thể kết nối Google Calendar: {type(exc).__name__}") from exc
+    return {"provider": "google", "connected": True, "mode": "readonly"}
+
+
+@router.post("/integrations/calendar/google/sync", response_model=CalendarSyncResult)
+def sync_google_calendar(
+    request: CalendarSyncRequest, settings: Settings = Depends(get_settings)
+):
+    try:
+        events = _google_connector(settings).list_events(request.days, request.max_results)
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Không thể đồng bộ Google Calendar: {type(exc).__name__}") from exc
+    repo = repository(settings)
+    repo.save_calendar_events(request.user_id, "google", events)
+    repo.record_decision(DecisionAudit(
+        user_id=request.user_id, action="google_calendar_sync", message="read-only import",
+        provider="google", confidence=1.0, applied=True,
+        reasoning="Người dùng chủ động đồng bộ lịch Google ở chế độ chỉ đọc.",
+        policy="least-privilege-readonly", risk="low",
+        change_summary=f"Đã nhập {len(events)} sự kiện; không ghi Google Calendar.",
+    ))
+    return CalendarSyncResult(user_id=request.user_id, event_count=len(events))
 
 
 @router.delete("/profile/{user_id}")

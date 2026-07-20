@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     gmail_token_path: str = "data/gmail_token.json"
     gmail_scan_days: int = 3
     gmail_max_results: int = 50
+    google_calendar_credentials_path: str = "secrets/google_calendar_credentials.json"
+    google_calendar_token_path: str = "data/google_calendar_token.json"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

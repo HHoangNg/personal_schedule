@@ -39,6 +39,19 @@ class ScheduleSession(BaseModel):
     status: Literal["planned", "completed", "skipped", "rescheduled", "partial"] = "planned"
     actual_minutes: int | None = Field(default=None, ge=0, le=1440)
     status_note: str = ""
+    source: Literal["ai", "user", "external"] = "ai"
+    external_event_id: str | None = Field(default=None, max_length=512)
+    is_locked: bool = False
+    lock_reason: str = Field(default="", max_length=500)
+    explanation: "ScheduleExplanation" = Field(default_factory=lambda: ScheduleExplanation())
+
+
+class ScheduleExplanation(BaseModel):
+    why_this_slot: str = "Chưa có giải thích chi tiết cho khối lịch này."
+    evidence: list[str] = Field(default_factory=list, max_length=8)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    alternatives: list[str] = Field(default_factory=list, max_length=3)
+    policy: str = "proposal-first"
 
 
 class GoalAnalysis(BaseModel):
@@ -212,6 +225,54 @@ class ProductivityAnalytics(BaseModel):
     metrics: dict[str, float | int | None] = Field(default_factory=dict)
 
 
+class LockBlockRequest(BaseModel):
+    locked: bool
+    reason: str = Field(default="", max_length=500)
+
+
+class ScheduleProposalRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+    trigger: Literal["manual", "new_task", "deadline_near", "progress_delay", "calendar_change"] = "manual"
+
+
+class ScheduleProposal(BaseModel):
+    proposal_id: str = Field(default_factory=lambda: str(uuid4()))
+    user_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    trigger: str
+    risk: Literal["low", "medium", "high"] = "medium"
+    requires_confirmation: bool = True
+    applied: bool = False
+    changes: list[dict] = Field(default_factory=list)
+    reasoning: str = Field(default="", max_length=2000)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class CalendarSyncRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+    days: int = Field(default=14, ge=1, le=31)
+    max_results: int = Field(default=250, ge=1, le=2500)
+
+
+class CalendarEvent(BaseModel):
+    event_id: str = Field(min_length=1, max_length=512)
+    summary: str = Field(default="", max_length=500)
+    start_at: datetime
+    end_at: datetime
+    updated_at: datetime | None = None
+    attendee_count: int = Field(default=0, ge=0)
+    is_cancelled: bool = False
+    etag: str = Field(default="", max_length=512)
+
+
+class CalendarSyncResult(BaseModel):
+    provider: Literal["google"] = "google"
+    user_id: str
+    event_count: int = 0
+    synced_at: datetime = Field(default_factory=utc_now)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class RecalculateRequest(BaseModel):
     user_id: str = Field(min_length=1)
     confirm_advice: bool = False
@@ -250,6 +311,9 @@ class DecisionAudit(BaseModel):
     confidence: float = Field(default=0.0, ge=0, le=1)
     requires_confirmation: bool = False
     reasoning: str = ""
+    policy: str = ""
+    risk: Literal["low", "medium", "high"] = "medium"
+    change_summary: str = Field(default="", max_length=2000)
     applied: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 

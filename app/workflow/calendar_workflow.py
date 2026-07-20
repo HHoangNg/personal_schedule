@@ -11,6 +11,7 @@ from app.schemas import (
     GoalAnalysis,
     ReviewQuestion,
     Risk,
+    ScheduleExplanation,
     ScheduleSession,
     ScheduleExclusion,
     Subtask,
@@ -121,6 +122,7 @@ class CalendarWorkflow:
             behavior_profile,
         )
         schedule = self._apply_dated_schedule_exclusions(schedule, request.schedule_exclusions)
+        schedule = self._explain_schedule(schedule, tasks, behavior_profile)
         warnings.extend(schedule_warnings)
         warnings.extend(self._validate_schedule_before_persist(schedule, tasks))
         return WorkflowResult(
@@ -142,6 +144,38 @@ class CalendarWorkflow:
             needs_confirmation=bool(warnings),
             confidence=confidence(warnings, len(tasks)),
         )
+
+    @classmethod
+    def _explain_schedule(
+        cls, schedule: list[ScheduleSession], tasks: list[Task], behavior_profile: dict | None
+    ) -> list[ScheduleSession]:
+        """Attach deterministic, user-visible rationale without changing placement logic."""
+        task_by_title = {task.title.casefold(): task for task in tasks}
+        profile = behavior_profile or {}
+        result = []
+        for block in schedule:
+            task = task_by_title.get(block.task_title.casefold())
+            evidence = [f"Khung giờ {block.period} còn trống và không chồng lịch."]
+            alternatives = [period for period in ("morning", "afternoon", "evening") if period != block.period][:2]
+            if task and task.deadline:
+                evidence.append(f"Cần hoàn thành trước hạn {task.deadline.isoformat()}.")
+            if task and task.priority == "high":
+                evidence.append("Công việc có mức ưu tiên cao.")
+            if profile.get("effective_period") == block.period:
+                evidence.append(f"Lịch sử phản hồi cho thấy bạn thường hiệu quả vào buổi {block.period}.")
+            confidence_score = 0.72 if profile.get("enough_data_for_auto_apply") else 0.5
+            if task and task.deadline:
+                confidence_score = min(0.9, confidence_score + 0.1)
+            result.append(block.model_copy(update={
+                "explanation": ScheduleExplanation(
+                    why_this_slot=f"Đặt '{block.task_title}' lúc {block.start_time} vì phù hợp khung {block.period} và các ràng buộc hiện có.",
+                    evidence=evidence,
+                    confidence=confidence_score,
+                    alternatives=[f"Có thể cân nhắc buổi {period} nếu bạn đổi ưu tiên." for period in alternatives],
+                    policy="proposal-first; block khóa hoặc có ràng buộc cứng luôn cần xác nhận",
+                ),
+            }))
+        return result
 
     def _generate_calendar_analysis(self, request: WorkflowRequest, behavior_profile: dict | None = None) -> tuple[StructuredLLMResponse, list[str]]:
         try:

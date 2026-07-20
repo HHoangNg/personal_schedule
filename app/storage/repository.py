@@ -8,12 +8,14 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from app.memory.embeddings import VoyageEmbedder
 from app.memory.qdrant import QdrantMemory
 from app.schemas import (
+    CalendarEvent,
     DecisionAudit,
     BehaviorProfile,
     DailyFeedback,
     ExecutionLog,
     PlanSummary,
     ProductivityAnalytics,
+    ScheduleProposal,
     WorkflowResult,
 )
 
@@ -62,7 +64,7 @@ class PlanRepository:
                 "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             connection.execute(
-                "INSERT INTO schema_meta(key, value) VALUES ('schema_version', '3') "
+                "INSERT INTO schema_meta(key, value) VALUES ('schema_version', '4') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
             connection.execute(
@@ -114,6 +116,41 @@ class PlanRepository:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decisions_user_date ON decision_audits(user_id, created_at DESC)"
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS schedule_proposals (
+                    proposal_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+                    trigger_name TEXT NOT NULL, risk TEXT NOT NULL, requires_confirmation INTEGER NOT NULL,
+                    applied INTEGER NOT NULL, changes_json TEXT NOT NULL, reasoning TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_proposals_user_date ON schedule_proposals(user_id, created_at DESC)"
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS calendar_sync_state (
+                    user_id TEXT NOT NULL, provider TEXT NOT NULL, last_synced_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, provider)
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS calendar_events (
+                    user_id TEXT NOT NULL, provider TEXT NOT NULL, event_id TEXT NOT NULL,
+                    summary TEXT NOT NULL, start_at TEXT NOT NULL, end_at TEXT NOT NULL,
+                    updated_at TEXT, attendee_count INTEGER NOT NULL, is_cancelled INTEGER NOT NULL,
+                    etag TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, provider, event_id)
+                )"""
+            )
+            self._ensure_column(connection, "decision_audits", "policy", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "decision_audits", "risk", "TEXT NOT NULL DEFAULT 'medium'")
+            self._ensure_column(connection, "decision_audits", "change_summary", "TEXT NOT NULL DEFAULT ''")
+
+    @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def save(self, user_id: str, plan: WorkflowResult) -> WorkflowResult:
         with self._connect() as connection:
@@ -211,16 +248,18 @@ class PlanRepository:
             connection.execute(
                 """INSERT INTO decision_audits(
                     decision_id,user_id,plan_id,action,message,provider,confidence,
-                    requires_confirmation,reasoning,applied,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    requires_confirmation,reasoning,applied,created_at,policy,risk,change_summary
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(decision_id) DO UPDATE SET
                     plan_id=excluded.plan_id,applied=excluded.applied,
-                    reasoning=excluded.reasoning,created_at=excluded.created_at""",
+                    reasoning=excluded.reasoning,created_at=excluded.created_at,
+                    policy=excluded.policy,risk=excluded.risk,change_summary=excluded.change_summary""",
                 (
                     decision.decision_id, decision.user_id, decision.plan_id,
                     decision.action, decision.message, decision.provider,
                     decision.confidence, int(decision.requires_confirmation),
                     decision.reasoning, int(decision.applied), payload["created_at"],
+                    decision.policy, decision.risk, decision.change_summary,
                 ),
             )
         self._sync_memory(f"decision:{decision.user_id}:{decision.decision_id}", payload)
@@ -238,6 +277,9 @@ class PlanRepository:
                 action=row["action"], message=row["message"], provider=row["provider"],
                 confidence=row["confidence"], requires_confirmation=bool(row["requires_confirmation"]),
                 reasoning=row["reasoning"], applied=bool(row["applied"]),
+                policy=row["policy"] if "policy" in row.keys() else "",
+                risk=row["risk"] if "risk" in row.keys() else "medium",
+                change_summary=row["change_summary"] if "change_summary" in row.keys() else "",
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
             for row in rows
@@ -315,6 +357,23 @@ class PlanRepository:
 
     def analytics(self, user_id: str) -> ProductivityAnalytics:
         profile = self.behavior_profile(user_id)
+        executions = self._execution_rows(user_id)
+        duration_errors = []
+        manual_changes = 0
+        for row in executions:
+            if row["status"] == "rescheduled":
+                manual_changes += 1
+            if row["actual_minutes"] is None:
+                continue
+            start_h, start_m = [int(value) for value in row["scheduled_start_time"].split(":")]
+            end_h, end_m = [int(value) for value in row["scheduled_end_time"].split(":")]
+            duration_errors.append(abs(row["actual_minutes"] - ((end_h * 60 + end_m) - (start_h * 60 + start_m))))
+        with self._connect() as connection:
+            decision_rows = connection.execute(
+                "SELECT action, applied FROM decision_audits WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        suggestion_rows = [row for row in decision_rows if row["action"] in {"apply_suggestion", "schedule_proposal"}]
+        accepted = sum(bool(row["applied"]) for row in suggestion_rows)
         return ProductivityAnalytics(
             user_id=user_id,
             profile=profile,
@@ -323,8 +382,71 @@ class PlanRepository:
                 "procrastination_rate": profile.procrastination_rate,
                 "execution_count": profile.execution_count,
                 "sample_days": profile.sample_days,
+                "duration_mae_minutes": round(sum(duration_errors) / len(duration_errors), 2) if duration_errors else None,
+                "manual_schedule_changes": manual_changes,
+                "suggestion_acceptance_rate": round(accepted / len(suggestion_rows), 3) if suggestion_rows else None,
             },
         )
+
+    def set_block_lock(self, user_id: str, plan_id: str, block_id: str, locked: bool, reason: str) -> WorkflowResult:
+        plan = self.get_for_user(user_id, plan_id)
+        if not plan:
+            raise KeyError("Không tìm thấy kế hoạch.")
+        found = False
+        updated_schedule = []
+        for block in plan.schedule:
+            if block.block_id == block_id:
+                found = True
+                updated_schedule.append(block.model_copy(update={"is_locked": locked, "lock_reason": reason if locked else ""}))
+            else:
+                updated_schedule.append(block)
+        if not found:
+            raise KeyError("Không tìm thấy khối lịch.")
+        return self.save(user_id, plan.model_copy(update={"schedule": updated_schedule}))
+
+    def save_proposal(self, proposal: ScheduleProposal) -> ScheduleProposal:
+        payload = proposal.model_dump(mode="json")
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO schedule_proposals(
+                    proposal_id,user_id,plan_id,trigger_name,risk,requires_confirmation,
+                    applied,changes_json,reasoning,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(proposal_id) DO UPDATE SET applied=excluded.applied,changes_json=excluded.changes_json""",
+                (
+                    proposal.proposal_id, proposal.user_id, proposal.plan_id, proposal.trigger,
+                    proposal.risk, int(proposal.requires_confirmation), int(proposal.applied),
+                    json.dumps(payload["changes"], ensure_ascii=False), proposal.reasoning,
+                    payload["created_at"],
+                ),
+            )
+        return proposal
+
+    def save_calendar_events(self, user_id: str, provider: str, events: list[CalendarEvent]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            for event in events:
+                payload = event.model_dump(mode="json")
+                connection.execute(
+                    """INSERT INTO calendar_events(
+                        user_id,provider,event_id,summary,start_at,end_at,updated_at,attendee_count,
+                        is_cancelled,etag,last_seen_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(user_id,provider,event_id) DO UPDATE SET
+                        summary=excluded.summary,start_at=excluded.start_at,end_at=excluded.end_at,
+                        updated_at=excluded.updated_at,attendee_count=excluded.attendee_count,
+                        is_cancelled=excluded.is_cancelled,etag=excluded.etag,last_seen_at=excluded.last_seen_at""",
+                    (
+                        user_id, provider, event.event_id, event.summary, payload["start_at"],
+                        payload["end_at"], payload["updated_at"], event.attendee_count,
+                        int(event.is_cancelled), event.etag, now,
+                    ),
+                )
+            connection.execute(
+                """INSERT INTO calendar_sync_state(user_id,provider,last_synced_at) VALUES (?,?,?)
+                ON CONFLICT(user_id,provider) DO UPDATE SET last_synced_at=excluded.last_synced_at""",
+                (user_id, provider, now),
+            )
 
     def delete_user_data(self, user_id: str) -> int:
         if self.qdrant_sync_enabled and self.qdrant_url and self.qdrant_collection and self.qdrant_api_key:
@@ -340,6 +462,9 @@ class PlanRepository:
             connection.execute("DELETE FROM execution_logs WHERE user_id = ?", (user_id,))
             connection.execute("DELETE FROM daily_feedback WHERE user_id = ?", (user_id,))
             connection.execute("DELETE FROM decision_audits WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM schedule_proposals WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM calendar_events WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM calendar_sync_state WHERE user_id = ?", (user_id,))
             connection.execute("DELETE FROM plans WHERE user_id = ?", (user_id,))
         for plan_id in plan_ids:
             (self.json_directory / f"{plan_id}.json").unlink(missing_ok=True)
